@@ -15,16 +15,18 @@
   "scripts": {
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
-    "build": "node --max-old-space-size=2048 node_modules/.bin/tsc"
+    "build": "esbuild src/index.ts --bundle --platform=node --target=node20 --outfile=dist/index.js --packages=external",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "bullmq": "^4.0.0",
     "ioredis": "^5.3.0",
-    "mongoose": "^8.23.0"
+    "mongoose": "^8.23.0",
+    "typescript": "^5.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
-    "ts-node": "^10.9.0",
-    "typescript": "^5.0.0"
+    "esbuild": "^0.25.0",
+    "ts-node": "^10.9.0"
   }
 }
