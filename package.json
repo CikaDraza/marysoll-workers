@@ -1,0 +1,30 @@
+{
+  "name": "marysoll-workers",
+  "version": "1.0.0",
+  "description": "email worker for Marysoll system",
+  "keywords": [
+    "email",
+    "worker",
+    "CRON",
+    "BullMQ"
+  ],
+  "license": "ISC",
+  "author": "DMDevelon",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "scripts": {
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "bullmq": "^4.0.0",
+    "ioredis": "^5.3.0",
+    "mongoose": "^8.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.0.0"
+  }
+}
