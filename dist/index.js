@@ -24,30 +24,10 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 
 // src/index.ts
 var import_config = require("dotenv/config");
+var import_mongoose2 = __toESM(require("mongoose"));
+
+// src/workers/campaignPoller.ts
 var import_mongoose = __toESM(require("mongoose"));
-
-// src/workers/emailCampaignWorker.ts
-var import_bullmq = require("bullmq");
-
-// src/redis.ts
-var import_ioredis = __toESM(require("ioredis"));
-var redisUrl = process.env.REDIS_URL;
-if (!redisUrl) {
-  throw new Error(
-    "[redis] REDIS_URL is not set. Set it to your Upstash Redis URL: rediss://:token@hostname:port"
-  );
-}
-var connection = new import_ioredis.default(redisUrl, {
-  maxRetriesPerRequest: null,
-  enableReadyCheck: false,
-  // Enable TLS when the URL scheme is rediss:// (Upstash default)
-  tls: redisUrl.startsWith("rediss://") ? {} : void 0
-});
-connection.on("connect", () => console.log("[redis] Connected"));
-connection.on(
-  "error",
-  (err) => console.error("[redis] Connection error:", err.message)
-);
 
 // src/services/sendCampaign.ts
 async function sendCampaign({ campaignId }) {
@@ -77,37 +57,56 @@ async function sendCampaign({ campaignId }) {
   );
 }
 
-// src/workers/emailCampaignWorker.ts
-var emailCampaignWorker = new import_bullmq.Worker(
-  "email-campaign-queue",
-  async (job) => {
-    if (job.name !== "send-campaign") {
-      console.warn(
-        `[emailCampaignWorker] Unknown job name "${job.name}" (id: ${job.id}) \u2014 skipping`
-      );
-      return;
+// src/workers/campaignPoller.ts
+function getCampaignModel() {
+  const schema = new import_mongoose.Schema({}, { strict: false });
+  return import_mongoose.default.models.EmailCampaign ?? import_mongoose.default.model("EmailCampaign", schema);
+}
+var POLL_INTERVAL_MS = 6e4;
+async function tick() {
+  const Campaign = getCampaignModel();
+  const now = /* @__PURE__ */ new Date();
+  let claimed;
+  do {
+    claimed = await Campaign.findOneAndUpdate(
+      {
+        "scheduling.status": "scheduled",
+        "scheduling.sendAt": { $lte: now }
+      },
+      { $set: { "scheduling.status": "sending" } },
+      { new: false }
+      // return the pre-update doc to get the _id
+    ).lean();
+    if (!claimed) break;
+    const campaignId = claimed._id.toString();
+    console.log(`[poller] Claimed campaign ${campaignId} \u2014 dispatching`);
+    try {
+      await sendCampaign({ campaignId });
+    } catch (err) {
+      console.error(`[poller] Campaign ${campaignId} failed:`, err);
+      await Campaign.findByIdAndUpdate(campaignId, {
+        $set: { "scheduling.status": "failed" }
+      });
     }
-    const { campaignId } = job.data;
-    if (!campaignId) {
-      throw new Error(
-        `[emailCampaignWorker] Job ${job.id} is missing campaignId \u2014 check the producer`
-      );
-    }
-    console.log(
-      `[emailCampaignWorker] Processing job ${job.id} \u2014 campaign: ${campaignId}`
-    );
-    await sendCampaign({ campaignId });
-  },
-  {
-    connection,
-    concurrency: 5
-  }
-);
+  } while (claimed);
+}
+function startCampaignPoller() {
+  console.log(
+    `[poller] Started \u2014 polling every ${POLL_INTERVAL_MS / 1e3} s`
+  );
+  tick().catch((err) => console.error("[poller] Tick error:", err));
+  const timer = setInterval(() => {
+    tick().catch((err) => console.error("[poller] Tick error:", err));
+  }, POLL_INTERVAL_MS);
+  return () => {
+    clearInterval(timer);
+    console.log("[poller] Stopped");
+  };
+}
 
 // src/index.ts
 var REQUIRED_ENV = [
   "MONGODB_URI",
-  "REDIS_URL",
   "INTERNAL_API_URL",
   "INTERNAL_API_KEY"
 ];
@@ -119,42 +118,24 @@ for (const key of REQUIRED_ENV) {
 }
 async function connectMongo() {
   const uri = process.env.MONGODB_URI;
-  await import_mongoose.default.connect(uri);
+  await import_mongoose2.default.connect(uri);
   console.log("[bootstrap] MongoDB connected");
 }
-emailCampaignWorker.on("completed", (job) => {
-  console.log(
-    `[worker] \u2713 Job ${job.id} completed (campaign: ${job.data.campaignId})`
-  );
-});
-emailCampaignWorker.on("failed", (job, err) => {
-  const id = job?.id ?? "unknown";
-  const campaignId = job?.data?.campaignId ?? "unknown";
-  console.error(
-    `[worker] \u2717 Job ${id} failed (campaign: ${campaignId}): ${err.message}`
-  );
-});
-emailCampaignWorker.on("stalled", (jobId) => {
-  console.warn(`[worker] Job ${jobId} stalled \u2014 BullMQ will retry`);
-});
-emailCampaignWorker.on("error", (err) => {
-  console.error("[worker] Worker error:", err.message);
+var stopPoller = null;
+(async () => {
+  await connectMongo();
+  stopPoller = startCampaignPoller();
+  console.log("[bootstrap] Marysoll workers started \u2014 polling MongoDB for scheduled campaigns");
+})().catch((err) => {
+  console.error("[bootstrap] Fatal startup error:", err);
+  process.exit(1);
 });
 async function shutdown(signal) {
-  console.log(`[bootstrap] Received ${signal} \u2014 shutting down gracefully`);
-  await emailCampaignWorker.close();
-  await import_mongoose.default.disconnect();
+  console.log(`[bootstrap] Received ${signal} \u2014 shutting down`);
+  if (stopPoller) stopPoller();
+  await import_mongoose2.default.disconnect();
   console.log("[bootstrap] Shutdown complete");
   process.exit(0);
 }
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
-(async () => {
-  await connectMongo();
-  console.log(
-    "[bootstrap] Marysoll workers started \u2014 listening on email-campaign-queue"
-  );
-})().catch((err) => {
-  console.error("[bootstrap] Fatal startup error:", err);
-  process.exit(1);
-});

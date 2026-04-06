@@ -1,16 +1,13 @@
 import 'dotenv/config';
 import mongoose from "mongoose";
-import { emailCampaignWorker } from "./workers/emailCampaignWorker";
+import { startCampaignPoller } from "./workers/campaignPoller";
 
 // ---------------------------------------------------------------------------
 // Environment validation
-// Fail immediately at startup if critical env vars are missing —
-// better than cryptic runtime errors deep inside a job.
 // ---------------------------------------------------------------------------
 
 const REQUIRED_ENV = [
   "MONGODB_URI",
-  "REDIS_URL",
   "INTERNAL_API_URL",
   "INTERNAL_API_KEY",
 ] as const;
@@ -33,39 +30,27 @@ async function connectMongo(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Worker event listeners
+// Start
 // ---------------------------------------------------------------------------
 
-emailCampaignWorker.on("completed", (job) => {
-  console.log(
-    `[worker] ✓ Job ${job.id} completed (campaign: ${job.data.campaignId})`,
-  );
-});
+let stopPoller: (() => void) | null = null;
 
-emailCampaignWorker.on("failed", (job, err) => {
-  const id         = job?.id         ?? "unknown";
-  const campaignId = job?.data?.campaignId ?? "unknown";
-  console.error(
-    `[worker] ✗ Job ${id} failed (campaign: ${campaignId}): ${err.message}`,
-  );
-});
-
-emailCampaignWorker.on("stalled", (jobId) => {
-  console.warn(`[worker] Job ${jobId} stalled — BullMQ will retry`);
-});
-
-emailCampaignWorker.on("error", (err) => {
-  console.error("[worker] Worker error:", err.message);
+(async () => {
+  await connectMongo();
+  stopPoller = startCampaignPoller();
+  console.log("[bootstrap] Marysoll workers started — polling MongoDB for scheduled campaigns");
+})().catch((err: unknown) => {
+  console.error("[bootstrap] Fatal startup error:", err);
+  process.exit(1);
 });
 
 // ---------------------------------------------------------------------------
 // Graceful shutdown
-// Waits for the current job to finish before closing connections.
 // ---------------------------------------------------------------------------
 
 async function shutdown(signal: string): Promise<void> {
-  console.log(`[bootstrap] Received ${signal} — shutting down gracefully`);
-  await emailCampaignWorker.close();
+  console.log(`[bootstrap] Received ${signal} — shutting down`);
+  if (stopPoller) stopPoller();
   await mongoose.disconnect();
   console.log("[bootstrap] Shutdown complete");
   process.exit(0);
@@ -73,17 +58,3 @@ async function shutdown(signal: string): Promise<void> {
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT",  () => shutdown("SIGINT"));
-
-// ---------------------------------------------------------------------------
-// Start
-// ---------------------------------------------------------------------------
-
-(async () => {
-  await connectMongo();
-  console.log(
-    "[bootstrap] Marysoll workers started — listening on email-campaign-queue",
-  );
-})().catch((err: unknown) => {
-  console.error("[bootstrap] Fatal startup error:", err);
-  process.exit(1);
-});
